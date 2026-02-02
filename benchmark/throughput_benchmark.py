@@ -4,6 +4,7 @@ import argparse
 import json
 import time
 from concurrent.futures import ThreadPoolExecutor, wait
+from dataclasses import dataclass
 from typing import Any
 
 from benchmark.common import SageMakerRuntimeClient, summarize_throughput, write_results
@@ -38,27 +39,43 @@ def main() -> None:
             pass
 
     end_time = time.perf_counter() + args.duration_seconds
-    successes = 0
-    errors = 0
-    requests = 0
 
-    def worker() -> None:
-        nonlocal successes, errors, requests
+    @dataclass
+    class Counts:
+        requests: int = 0
+        successes: int = 0
+        errors: int = 0
+
+    def worker() -> Counts:
+        local = Counts()
         while time.perf_counter() < end_time:
-            requests += 1
+            local.requests += 1
             try:
                 client.invoke(args.endpoint_name, payload, content_type=args.content_type, accept=args.accept)
-                successes += 1
+                local.successes += 1
             except Exception:
-                errors += 1
+                local.errors += 1
+        return local
 
     start = time.perf_counter()
     with ThreadPoolExecutor(max_workers=args.concurrency) as ex:
         futs = [ex.submit(worker) for _ in range(args.concurrency)]
         wait(futs)
     duration = time.perf_counter() - start
+    counts = Counts()
+    for f in futs:
+        local = f.result()
+        counts.requests += local.requests
+        counts.successes += local.successes
+        counts.errors += local.errors
 
-    summary = summarize_throughput(duration, concurrency=args.concurrency, requests=requests, successes=successes, errors=errors)
+    summary = summarize_throughput(
+        duration,
+        concurrency=args.concurrency,
+        requests=counts.requests,
+        successes=counts.successes,
+        errors=counts.errors,
+    )
     record: dict[str, Any] = {
         "kind": "throughput",
         "endpoint_name": args.endpoint_name,
